@@ -1,0 +1,27 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1584225393811.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "2297573934",
+    "id" : "1740F73E",
+    "lastKnownWriteTime" : 1584235920,
+    "last_content_update" : 1584235920377,
+    "path" : "~/Data_Science/Data_Science_2/Final_Project/Final_Report.Rmd",
+    "project_path" : "Final_Report.Rmd",
+    "properties" : {
+        "cursorPosition" : "4,7",
+        "docOutlineVisible" : "1",
+        "scrollLine" : "0",
+        "tempName" : "Untitled1"
+    },
+    "read_only" : false,
+    "read_only_alternatives" : [
+    ],
+    "relative_order" : 1,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_markdown"
+}

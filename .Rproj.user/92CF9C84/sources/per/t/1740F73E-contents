@@ -1,0 +1,527 @@
+---
+title: "Predicting Asian American Party Affiliation"
+author: "Akash Palani"
+date: "January 27^th^, 2020"
+output:
+  html_document:
+    code_folding: hide
+    highlight: tango
+    toc: yes
+    toc_float: yes
+    toc_depth: 2
+subtitle: STAT 301-2 Data Science II Final Project
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(skimr)
+library(tidyr)
+library(janitor)
+library(broom)
+library(MASS)
+library(tidyverse)
+library(modelr)
+library(janitor)
+library(skimr)
+library(broom)
+library(corrplot)
+library(class)
+library(GGally)
+library(glmnet) # ridge & lasso
+library(glmnetUtils) # improves working with glmnet
+```
+
+# Introduction
+
+I built multiple models to predict voter party affiliation using the National Asian American Voter Survey, 2016 (NAAS16). The survey is conducted regularly, with 2016 being the most recent complete data publicly available, and is led by Dr. S. Karthick Ramakrishnan of the University of California-Riverside. NAAS16 collected a vast amount of information about almost 5,000 surveyed voters; respondents were asked about political and social identities and behavior, policy opinions, and their demopgraphics. I attempt to build the a model that predicts an individual's party affiliation based solely on their stated policy opinions. These models are purely predictive, as proper experimental design for inference has not been done. 
+
+# Data Setup
+
+```{r}
+set.seed(1234)
+load(file = "data/data.rda")
+
+raw_data <- da37024.0001
+
+clean_data <- raw_data %>%
+  dplyr::select(
+    RESPID,
+    Q7_1,
+    Q6_1A, 
+    Q6_5_1, 
+    Q6_5_2, 
+    Q6_5_3, 
+    Q6_5_4, 
+    Q6_5_5, 
+    Q6_5_6, 
+    Q6_5_7, 
+
+  )
+
+clean_data <- clean_data %>% 
+  mutate_if(is_character, factor)
+
+#recode missingness according to codebook
+clean_data_ <- clean_data %>%
+  mutate(Q7_1  = fct_recode(Q7_1, 
+                           "(05) Don't think in terms of parties" = "(05) DO NOT READ  Do not think in terms of political parties", 
+                           "(04) Other party" = "(04) Other party  SPECIFY")) 
+
+
+#recode for question frame. dems are biggest single group, what makes someone a dem? 
+clean_data <- clean_data %>%
+  mutate(party = fct_recode(Q7_1,
+                            "Democrat" = "(01) Democrat", 
+                            "Other" = "(02) Republican", 
+                            "Other" = "(03) Independent", 
+                            "Other" = "(04) Other party  SPECIFY", 
+                            "Other" = "(05) DO NOT READ  Do not think in terms of political parties", 
+                            "Other" = "(98) UNDOCUMENTED CODE"
+                            )) 
+
+eda_data <- clean_data %>% sample_frac(0.10)
+
+clean_data <- setdiff(clean_data, eda_data)
+#recode missingness
+clean_data <- clean_data %>%
+  mutate(Q6_1A = as.character(Q6_1A)) %>%
+  mutate(Q6_5_1 = as.character(Q6_5_1)) %>%
+  mutate(Q6_5_2 = as.character(Q6_5_2)) %>%
+  mutate(Q6_5_3 = as.character(Q6_5_3)) %>%
+  mutate(Q6_5_4 = as.character(Q6_5_4)) %>%
+  mutate(Q6_5_5 = as.character(Q6_5_5)) %>%
+  mutate(Q6_5_6 = as.character(Q6_5_6)) %>%
+  mutate(Q6_5_7 = as.character(Q6_5_7)) %>%
+  replace_na(list(Q6_1A = "Don't Know/Refused",
+                  Q6_5_1 = "Don't Know/Refused",
+                  Q6_5_2 = "Don't Know/Refused",
+                  Q6_5_3 = "Don't Know/Refused",
+                  Q6_5_4 = "Don't Know/Refused",
+                  Q6_5_5 = "Don't Know/Refused",
+                  Q6_5_6 = "Don't Know/Refused",
+                  Q6_5_7 = "Don't Know/Refused")) %>%
+  mutate(Q6_1A = as.factor(Q6_1A))%>%
+  mutate(Q6_5_1 = as.factor(Q6_5_1))%>%
+  mutate(Q6_5_2 = as.factor(Q6_5_2))%>%
+  mutate(Q6_5_3 = as.factor(Q6_5_3))%>%
+  mutate(Q6_5_4 = as.factor(Q6_5_4))%>%
+  mutate(Q6_5_5 = as.factor(Q6_5_5))%>%
+  mutate(Q6_5_6 = as.factor(Q6_5_6))%>%
+  mutate(Q6_5_7 = as.factor(Q6_5_7))
+
+clean_data <- clean_data %>%
+  mutate(Q6_1A = fct_recode(Q6_1A, "Don't Know/Refused" = "(15) UNDOCUMENTED CODE" ))
+
+#drop replicated var
+clean_data <- clean_data %>%
+  dplyr::select(-Q7_1)
+
+#split into testing/training data 
+
+
+#drop missing
+clean_data <- clean_data %>%
+  drop_na()
+
+#drop uneeded unique identifier
+clean_data <- clean_data %>%
+  dplyr::select(-RESPID)
+
+eda_data <- eda_data %>%
+  dplyr::select(-RESPID)
+
+
+clean_data_split <- tibble(train = list(clean_data %>% sample_frac(0.80)),
+                  test  = list(clean_data %>% setdiff(train)))
+
+```
+
+There are 316 columns in this dataset (including the repsonse, party affiliation), but most of them are not relevant to the question at hand. In setting up the data, I had to identify just the questions that were asked about policy opinions, and was able to narrow the number of potential predictors to p = 8. These predictors were all of the questions to which respondents gave specific policy opinions, and are outlined in the list below. 
+
+<ul>
+  <li> `Q6_1A`: "What do you think is the most important problem facing the United States today?". Factor (15 levels). </li>
+  <li> `Q6_5_1`: "Do you support or oppose the health care law passed by Barack Obama and Congress [Obamacare]?". Factor (3 levels).
+  </li>
+  <li>  `Q6_5_2`: "Do you support or oppose major new spending by the federal government that would help undergraduates pay tuition at public colleges without needing loans?". Factor (3 levels). </li>
+  <li> `Q6_5_3`: "Do you support or oppose accepting Syrian refugees into the United States?". Factor (3 levels).   </li>
+  <li> `Q6_5_4`: "Do you support or oppose legalizing the possession of small amounts of marijuana for personal use?" Factor (3 levels).  </li>
+  <li> `Q6_5_5`: "Do you support or oppose banning people who are Muslim from entering the United States?" Factor (3 levels). </li>
+  <li> `Q6_5_6`: "Do you support or oppose setting stricter emission limits on power plants in order to address climate change?" Factor (3 levels). </li>
+  <li> `Q6_5_7`: "Do you support or oppose the government doing more to give blacks equal rights with whites?" Factor (3 levels). </li>
+</ul>
+<br>
+The response variable is `party`. I recoded this variable into a binomial factor: voters that identified as Democrats, and those that identified with another party. This makes models easier to interpret, and in an industry setting, would be a logical way to code the response. 
+<br> <br>
+After importing the relevant data, I split the data for analysis. 10% of the data (479 obs.) was set aside for exploratory data analysis. Of the remaining data, 80% (3191 obs.) was set aside for model building, and 20% (361 obs.) for model testing. Missingness was accounted for based on the results of the EDA (Appendix A): missing values for `party` were dropped, and missing values for all predictors were recoded as "Don't Know/Refused". 
+
+# Model Building 
+I built logisitic regression, linear discriminant analysis, and LASSO models. EDA helped guide the selection of predictors for logisitic regression and LDA. For both methods, I  ran three models. The first was a model with all potential predictors (henceforth referred to as "kitchen sink"), the second used only the predictors identified in EDA as having a clear relationship with the response ("EDA selected"), and the third used only the respondent's choice of top issue facing the United States as a predictor ("top issue"). This third model was based on theory, not EDA results; I was curious to see how high the predicive power of the an individual's choice of top issue facing the US is with regards to party affiliation. LASSO, of course, is a feature selection method, so only two LASSO models--each with different $\lambda$ values--were run. 
+
+## Logistic Regression
+**Results (Error Rate)**
+```{r}
+
+# Load Packages -----------------------------------------------------------
+
+#logistic 
+glm_fits <- clean_data_split %>% 
+  mutate(log_mod_01 = map(train, glm, 
+                      formula = party ~.,
+                      family = binomial("logit")), 
+         log_mod_02 = map(train, glm, 
+                      formula = party ~ Q6_1A + Q6_5_1 + Q6_5_2 + Q6_5_3 + Q6_5_7, 
+                      family = binomial("logit")), 
+         log_mod_03 = map(train, glm, 
+                      formula = party ~ Q6_1A, 
+                      family = binomial("logit"))) %>%
+  pivot_longer(cols = contains("mod_"), names_to = "model_name", values_to =  "model_fit")
+
+#now, for all the models 
+#Function for error rate
+error_rate_glm <- function(data, model){
+  data %>% 
+    mutate(pred_prob = predict(model, newdata = data, type = "response"),
+           pred_party = if_else(pred_prob > 0.5, "Other", "Democrat"),
+           error = pred_party != party) %>% 
+    pull(error) %>% 
+    mean()
+}
+
+# Function to form confusion matrix
+confusion_mat_glm <- function(data, model){
+  data %>% 
+    mutate(pred_prob = predict(model, newdata = data, type = "response"),
+           pred_party = if_else(pred_prob > 0.5, "Other", "Democrat")) %>% 
+    count(party, pred_party) %>% 
+    mutate(prop = n / sum(n))
+}
+
+
+# Calculate model error
+glm_fits <- glm_fits %>% 
+  mutate(train_error = map2_dbl(train, model_fit, error_rate_glm),
+         test_error  = map2_dbl(test, model_fit, error_rate_glm),
+         test_confusion = map2(test, model_fit, confusion_mat_glm))  
+
+log_error <- glm_fits %>% 
+  dplyr::select(model_name, test_error) %>% 
+  # select_if(~ !is_list(.)) %>% 
+  arrange(test_error) 
+
+log_error
+```
+<br>
+Above are the results of the three logistic models I described. I used the validation set approach to calculate error rates for these models. From the results, it would seem that the EDA selected model performed the best, with kitchen sink model coming in a very close second. The top issue model did not perform as well as the others. Since the performance of the top two candidate models is quite similar, it is worth examining their confusion matricies. <br> <br>
+**log_mod_01 (kitchen sink) Confusion Matrix**
+```{r}
+#log_mod_1 confusion matrix
+glm_fits %>%
+  unnest(test_confusion) %>%
+  dplyr::select(model_name, party, pred_party, prop) %>%
+  dplyr::filter(model_name == "log_mod_01") %>%
+  dplyr::select(-model_name) %>% 
+  pivot_wider(names_from = pred_party, values_from = prop)
+```
+<br>
+**log_mod_02 (EDA selected) Confusion Matrix**
+```{r}
+#log_mod_2 confusion matrix
+glm_fits %>%
+  unnest(test_confusion) %>%
+  dplyr::select(model_name, party, pred_party, prop) %>%
+  dplyr::filter(model_name == "log_mod_02") %>%
+  dplyr::select(-model_name) %>% 
+  pivot_wider(names_from = pred_party, values_from = prop)
+
+```
+<br>
+From the confusion matrices above, it is clear that both models make type I and type II misclassifications at roughly the same rate, indicating no obvious preference between the two. Furthermore, there are no interpretability differences between these models, so it is sufficient to declare that the EDA selected model performs the best out of the logistic regression candidates based on its lower error rate. 
+
+## Linear Discriminant Analysis
+**Results (Error rate)**
+```{r}
+
+# Load Packages -----------------------------------------------------------
+
+library(MASS)
+library(tidyverse)
+library(modelr)
+library(janitor)
+library(skimr)
+library(broom)
+library(corrplot)
+library(class)
+
+
+# Linear Discriminant Analysis ----------------------------------------------------------------
+lda_fits <- clean_data_split %>% 
+  mutate(lda_mod_01 = map(train, ~ lda(formula = party ~.,
+                                   data = .x)),
+         lda_mod_02 = map(train, ~ lda(formula = party ~ Q6_1A + Q6_5_1 + Q6_5_2 + Q6_5_3 + Q6_5_7,
+                                   data = .x)), 
+         lda_mod_03 = map(train, ~ lda(formula = party ~ Q6_1A,
+                                   data = .x))) %>% 
+  pivot_longer(cols = contains("mod_"), names_to = "model_name", values_to = "model_fit")
+
+# Function to calculate lda error rate 
+error_rate_lda <- function(data, model){
+  data %>% 
+    mutate(pred_party = predict(model, newdata = data) %>% 
+             pluck("class"),
+           error = pred_party != party) %>% 
+    pull(error) %>% 
+    mean()
+}
+
+# Function to form lda confusion matrix
+confusion_mat_lda <- function(data, model){
+  data %>% 
+    mutate(pred_party = predict(model, newdata = data) %>% 
+             pluck("class")) %>% 
+    count(party, pred_party) %>% 
+    mutate(prop = n / sum(n))
+}
+
+# update lda_fits with error and confusion info
+lda_fits <- lda_fits %>% 
+  mutate(train_error = map2_dbl(train, model_fit, error_rate_lda),
+         test_error  = map2_dbl(test, model_fit, error_rate_lda),
+         test_confusion = map2(test, model_fit, confusion_mat_lda))  
+
+# Compare models by test_error
+lda_errors <- lda_fits %>% 
+  dplyr::select(model_name, test_error) %>% 
+  arrange(test_error)
+
+lda_errors
+```
+Above are the results of the three LDA models I described. I used the validation set approach to calculate error rates for these models. From the results, it would seem that the EDA selected model performed the best, with kitchen sink model coming in a very close second. The top issue model did not perform as well as the others. Notably, model 1 (kitchen sink) and model 2 (EDA selected) had error rates identical to those that were calculated by logistic regression. As before, since the performance of the top two candidate models is quite similar, it is worth examining their confusion matricies. <br> <br>
+
+**lda_mod_01 (kitchen sink) Confusion Matrix**
+```{r}
+# mod 1 confusion
+lda_fits %>%
+  unnest(test_confusion) %>%
+  dplyr::select(model_name, party, pred_party, prop) %>%
+  dplyr::filter(model_name == "lda_mod_01") %>%
+  dplyr::select(-model_name) %>% 
+  pivot_wider(names_from = pred_party, values_from = prop)
+```
+<br> **lda_mod_02 (EDA selected) Confusion Matrix**
+```{r}
+# mod 2 confusion
+lda_fits %>%
+  unnest(test_confusion) %>%
+  dplyr::select(model_name, party, pred_party, prop) %>%
+  dplyr::filter(model_name == "lda_mod_02") %>%
+  dplyr::select(-model_name) %>% 
+  pivot_wider(names_from = pred_party, values_from = prop)
+
+```
+From the confusion matrices above, it is clear that both models make type I and type II misclassifications at roughly the same rate, indicating no obvious preference between the two. Furthermore, there are no interpretability differences between these models, so it is sufficient to declare that the EDA selected model performs the best out of the linear discriminant analysis candidates based on its lower error rate. 
+
+## LASSO
+To perform LASSO, I first had to select the optimal value for $\lambda$. I used 10 fold cross validation to do this, the results of which appear on the plot below. 
+```{r}
+set.seed(1234)
+
+lambda_grid <- 10^seq(-2, 10, length = 200)
+
+train_data <- clean_data_split$train[[1]]
+
+
+test_data <- clean_data_split$test[[1]]
+
+# lasso: 10-fold cv
+lasso_cv <- train_data %>% 
+  cv.glmnet(
+    formula = party ~ ., 
+    data = ., 
+    alpha = 1, 
+    nfolds = 10,
+    family = "binomial"
+  )
+
+
+plot(lasso_cv)
+
+```
+<br> The resulting minimum and 1 standard deviation from minimum $\lambda$ values: 
+```{r}
+lasso_lambda_1se <- lasso_cv$lambda.1se
+lasso_lambda_min <- lasso_cv$lambda.min
+print(paste("Minimum: ", lasso_lambda_min))
+print(paste("1 SE: ", lasso_lambda_1se))
+```
+<br>
+Having identified appropriate values for $\lambda$, I LASSO using each of these values. The resulting error rates are displayed below. 
+
+**LASSO Error Rates**
+```{r}
+lasso_glmnet <- tibble(
+  train = train_data %>% list(),
+  test  = test_data %>% list()
+) %>%
+  mutate(
+    lasso_min = map(train, ~ glmnet(party ~ ., data = .x,
+                                    alpha = 1, lambda = lasso_lambda_min, family = "binomial")),
+    lasso_1se = map(train, ~ glmnet(party ~ ., data = .x,
+                                    alpha = 1, lambda = lasso_lambda_1se, family = "binomial"))
+  ) %>% 
+  pivot_longer(cols = c(-test, -train), names_to = "model_name", values_to = "fit")
+
+error_rate_lasso <- function(data, model){
+  data %>% 
+    mutate(pred_prob = predict(model, newdata = data, type = "response"),
+           pred_party = if_else(pred_prob > 0.5, "Other", "Democrat"),
+           error = pred_party != party) %>% 
+    pull(error) %>% 
+    mean()
+}
+
+lasso_errors <- lasso_glmnet %>% 
+  mutate(test_error  = map2_dbl(test, fit, error_rate_glm)) %>%
+  dplyr::select(model_name, test_error)
+
+lasso_errors
+
+```
+<br> 
+The $\lambda$ values 1 standard error above the minimum seems to perform best. We can compare the coefficients calculated by each model, and therefore the features they selected, to make our final selection. 
+
+**LASSO Coefficients**
+```{r}
+# Inspect/compare model coefficients 
+lasso_glmnet %>% 
+  pluck("fit") %>% 
+  map( ~ coef(.x) %>% 
+         as.matrix() %>% 
+         as.data.frame() %>% 
+         rownames_to_column("name")) %>%
+  reduce(full_join, by = "name") %>% 
+  mutate_if(is.double, ~ if_else(. == 0, NA_real_, .)) %>% 
+  rename(lasso_min = s0.x,
+         lasso_1se = s0.y) 
+
+```
+<br> Not only did LASSO with $\lambda$ set to one standard error above the minimum result in the lowest error rate, but it also selected fewer features (5, compared to 16 for $\lambda$ set to the minimize binomial deviance), making it a simpler and model and therefore the clear winner of the two LASSO models. 
+<br><br>
+The coefficients above are not easy to interpret. They will be clarified and discussed further in the next section of this report. 
+
+# Final Model Selection
+After having examined each of the types of models separately, I concluded that the best model for each method was simply the one with the lowest error rate. To make my final model selection, I compare the error rates of all models. 
+
+**All Error Rates**
+```{r, include = FALSE}
+one <- full_join(lda_errors, log_error)
+
+all_models <- full_join(one, lasso_errors) %>%
+  arrange(test_error)
+```
+
+```{r}
+all_models
+```
+<br><br>
+Clearly, the best model is LASSO with $\lambda = 0.0444241$, the value that results in a binomial deviance 1 standard error above the minimum. This model selected 5 features, and was able to predict with a lower error rate than all other models. Specifically, it selected:
+<ul>
+  <li> `Q6_5_1 (1)`: "Do you support or oppose the health care law passed by Barack Obama and Congress [Obamacare]?", Support.
+  </li>
+    <li> `Q6_5_1 (2)`: "Do you support or oppose the health care law passed by Barack Obama and Congress [Obamacare]?", Oppose.
+  </li>
+  <li>  `Q6_5_2 (1)`: "Do you support or oppose major new spending by the federal government that would help undergraduates pay tuition at public colleges without needing loans?", Support. </li>
+  <li>  `Q6_5_2 (2)`: "Do you support or oppose major new spending by the federal government that would help undergraduates pay tuition at public colleges without needing loans?", Oppose. </li>
+  <li> `Q6_5_7 (1)`: "Do you support or oppose the government doing more to give blacks equal rights with whites?", Support. </li>
+</ul>
+<br><br>
+
+Interestingly, the EDA selected models in LDA and logistic regression contained all of these predictors, because they appeared to have a relationship with `party` from the EDA. However, no causal inferences should be made from these results, and I will refrain from conjecture as to the relationship between these predictors and the response. 
+
+# Conclusions & Next Steps
+I am not surprised by the predictors that were included in LASSO's feature selection; they are generally accepted as major issues for Democratic voters. The error rate, `0.391`, is not bad, and is the answer to my original question. Based on just the policy views surveyed in NAAS16, I am able to accurately classify a voter as either a Democrat or not a Democrat about 61% of the time. 
+
+To build better models, there are a few things I believe would help. Using more of the predictors available in the dataset would likely result in lower error rates, but would require a reframing of my original question. Running subset selection methods in addition to the LASSO that was run in this analysis would yield fascinating results; by examining which features are selected by multiple feature selection methods, I could perhaps begin to idenfity which policy views are most salient to Asian American voters, at least in a predictive setting. 
+
+I am curious about the implications of this result to the broader question of how policy motivated Asian American voters are. Obviously, this dataset is limited and does not consist of a nationally inclusive random sample; far more rigorous statistical analysis is necessary to investigate this broader question. 
+
+# Appendix A: Exploratory Data Analysis
+## Distribution of `party`
+```{r}
+#visualize distributions
+viz_dis <- function(variable, title) {
+  ggplot(eda_data, aes(x = variable)) + geom_bar() + ggtitle(title)
+}
+```
+I first visualize the distribution of the response, `party`. 
+```{r}
+#response
+viz_dis(eda_data$party, "Party Affiliation")
+
+```
+There seems to be an almost even split between Democrats and non-Democrats, and the proportion of missingness is quite low. I therefore decided to drop all rows containing missing values for `party`, as I could do so without losing too many observations and those rows would not be useful for predictive modelling. 
+
+<br>
+
+## Distribution of Predictors
+I similarly visualized the distributions for all of the candidate predictor variables, the results of which are displayed below. 
+```{r}
+#most important issue facing US
+ggplot(eda_data, aes(x = Q6_1A)) + geom_bar() + ggtitle("Most Important Issue") + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+#obamacare
+viz_dis(eda_data$Q6_5_1, "Obamacare")
+
+#free public college
+viz_dis(eda_data$Q6_5_2, "Free Public College")
+
+#accepting syrian refugees
+viz_dis(eda_data$Q6_5_3, "Accept Syrian Refugees")
+
+#marijuana
+viz_dis(eda_data$Q6_5_4, "Legalize Marijuana Posession (Small Amounts)")
+
+#muslim ban
+viz_dis(eda_data$Q6_5_5, "Muslim Ban")
+
+#emissions
+viz_dis(eda_data$Q6_5_6, "Stricter Emissions Limits")
+
+#equal rights
+viz_dis(eda_data$Q6_5_7, "Government Action on African American Rights")
+```
+<br> For the candidate predictors, there are relatively high levels of missingness, and it would be unwise to simply drop these variables. According to the codebook for this survey, the responses reported as missing values for these variables actually indicate a response of "Don't Know/Refused", so these missing values are recoded as such for each of the predictors. 
+<br>
+
+## Covariation
+I examined the covariation between each predictor and `party` to determine whether there were any obvious relationships that should be exploited in predictive models. Visualizations of these covariation are displayed below. 
+
+```{r}
+#covariation
+ggplot(data = eda_data) +
+  geom_count(mapping = aes(x = party, y = Q6_5_1)) + ggtitle("obamacare")
+
+ggplot(data = eda_data) +
+  geom_count(mapping = aes(x = party, y = Q6_5_2)) + ggtitle("free college")
+
+ggplot(data = eda_data) +
+  geom_count(mapping = aes(x = party, y = Q6_5_3)) + ggtitle("syrian refugees")
+
+#exclude
+ggplot(data = eda_data) +
+  geom_count(mapping = aes(x = party, y = Q6_5_4)) + ggtitle("marijuana legalization")
+
+#exclude
+ggplot(data = eda_data) +
+  geom_count(mapping = aes(x = party, y = Q6_5_5)) + ggtitle("muslim ban")
+
+#exclude
+ggplot(data = eda_data) +
+  geom_count(mapping = aes(x = party, y = Q6_5_6)) + ggtitle("emission limits")
+
+ggplot(data = eda_data) +
+  geom_count(mapping = aes(x = party, y = Q6_5_7)) + ggtitle("equal rights")
+```
+<br>
+From these visualizations, I found that except for `Q6_5_4` (marijuana legalization), `Q6_5_5` (Muslim ban), and `Q6_5_6` (emissions limits), all predictors seem to have a pretty clear relationship with party. Therefore, I decided to run separate models that 1) included all predictors, and 2) included only predictors with clear relationships to the response. 
